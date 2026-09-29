@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_screen_recording_platform_interface/flutter_screen_recording_platform_interface.dart';
 
@@ -56,6 +57,17 @@ class FlutterScreenRecording {
       print(err);
     }
     return false;
+  }
+
+  /// Stops native recording, preserving failures when termination is unconfirmed.
+  /// An empty path means recording stopped without a usable video. Requires the
+  /// matching native plugin; web and older native builds throw instead.
+  static Future<String> get stopRecordScreenConfirmed async {
+    final path = await const MethodChannel('flutter_screen_recording').invokeMethod<String>('stopRecordScreenConfirmed');
+    if (path == null) {
+      throw PlatformException(code: 'INVALID_STOP_RESULT', message: 'Recording stop was not confirmed.');
+    }
+    return path;
   }
 
   static Future<String> get stopRecordScreen async {

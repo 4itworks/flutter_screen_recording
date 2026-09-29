@@ -42,6 +42,14 @@ Stop recording and get the output path or file name:
 final String path = await FlutterScreenRecording.stopRecordScreen;
 ```
 
+### Confirmed native stop
+
+For privacy-sensitive Android/iOS callers, await `FlutterScreenRecording.stopRecordScreenConfirmed` after awaiting start. Its completion confirms capture termination; the returned path may be empty when no usable video was produced. Native failures and missing implementations throw, so keep protected content hidden and allow a retry. The legacy `stopRecordScreen` getter still converts errors to an empty string and cannot establish recorder state.
+
+This API requires a full native build with the matching plugin. Older native binaries and web do not implement the confirmed-stop method. Service cleanup and attachment finalization are separate from capture termination.
+
+Run `flutter test test/confirmed_stop_test.dart` in this package for the Dart contract. Real-device checks still need to verify normal stop, immediate stop/no frames, OS-stopped capture, interrupted service cleanup, retry after native failure, and a subsequent recording on Android and iOS. These scenarios require physical-device validation.
+
 ## Android
 
 The Android implementation uses `MediaProjection`, `MediaRecorder`, and a foreground service.
