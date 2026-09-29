@@ -11,6 +11,8 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
     var audioWriterInput: AVAssetWriterInput?
     var videoOutputURL: URL?
     var isRecording = false
+    private var isStarting = false
+    private var isStopping = false
     var firstTimestamp: CMTime? 
     let screenSize = UIScreen.main.bounds
     
@@ -30,7 +32,7 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
                 return
             }
             startRecording(videoName: name, recordAudio: includeAudio, result: result)
-        case "stopRecordScreen":
+        case "stopRecordScreen", "stopRecordScreenConfirmed":
             stopRecording(result: result)
         default:
             result(FlutterMethodNotImplemented)
@@ -38,7 +40,7 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
     }
     
     func startRecording(videoName: String, recordAudio: Bool, result: @escaping FlutterResult) {
-        guard !isRecording else {
+        guard !isStarting, !isStopping, !recorder.isRecording else {
             result(FlutterError(code: "ALREADY_RECORDING", message: "Recording is already in progress", details: nil))
             return
         }
@@ -59,6 +61,7 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
             do {
                 videoWriter = try AVAssetWriter(outputURL: videoOutputURL!, fileType: .mp4)
             } catch {
+                isRecording = false
                 result(FlutterError(code: "FILE_ERROR", message: "Unable to create video file", details: error.localizedDescription))
                 return
             }
@@ -74,6 +77,7 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
             videoWriter?.add(videoWriterInput!)
             
             // Configurar la entrada de audio si es necesario
+            audioWriterInput = nil
             if recordAudio {
                 let audioSettings: [String: Any] = [
                     AVFormatIDKey: kAudioFormatMPEG4AAC,
@@ -87,28 +91,35 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
             
             // Iniciar la captura con ReplayKit
             recorder.isMicrophoneEnabled = recordAudio
+            isStarting = true
             recorder.startCapture(handler: { [weak self] sampleBuffer, sampleBufferType, error in
-                guard let self = self, self.isRecording, error == nil else { return }
-                
-                switch sampleBufferType {
-                case .video:
-                    self.handleVideoBuffer(sampleBuffer)
-                case .audioMic:
-                    if recordAudio {
-                        self.handleAudioBuffer(sampleBuffer)
+                DispatchQueue.main.async {
+                    guard let self = self, self.isRecording, error == nil else { return }
+                    switch sampleBufferType {
+                    case .video:
+                        self.handleVideoBuffer(sampleBuffer)
+                    case .audioMic:
+                        if recordAudio {
+                            self.handleAudioBuffer(sampleBuffer)
+                        }
+                    default:
+                        break
                     }
-                default:
-                    break
                 }
             }) { error in
-                if let error = error {
-                    result(FlutterError(code: "CAPTURE_ERROR", message: "Failed to start screen recording", details: error.localizedDescription))
-                } else {
-                    result(true)
+                DispatchQueue.main.async {
+                    self.isStarting = false
+                    if let error = error {
+                        self.isRecording = false
+                        result(FlutterError(code: "CAPTURE_ERROR", message: "Failed to start screen recording", details: error.localizedDescription))
+                    } else {
+                        result(true)
+                    }
                 }
             }
         } 
         else {
+            isRecording = false
             result(FlutterError(code: "IOS_VERSION_ERROR", message: "This feature is only available on iOS 11 or later", details: nil))
         }
     }
@@ -138,32 +149,43 @@ public class SwiftFlutterScreenRecordingPlugin: NSObject, FlutterPlugin {
     }
     
     func stopRecording(result: @escaping FlutterResult) {
-        // Detener la captura con ReplayKit
-        guard isRecording else {
-            result(FlutterError(code: "NOT_RECORDING", message: "No recording in progress", details: nil))
+        guard !isStarting, !isStopping else {
+            result(FlutterError(code: "RECORDING_PENDING", message: "A recording operation is still pending", details: nil))
             return
         }
-        isRecording = false
-        if #available(iOS 11.0, *) {
-            recorder.stopCapture { [weak self] error in
-                guard let self = self else { return }
-                
+        guard recorder.isRecording else {
+            isRecording = false
+            if videoWriter?.status == .writing { videoWriter?.cancelWriting() }
+            result("")
+            return
+        }
+        guard #available(iOS 11.0, *) else {
+            result(FlutterError(code: "IOS_VERSION_ERROR", message: "This feature is only available on iOS 11 or later", details: nil))
+            return
+        }
+        isStopping = true
+        recorder.stopCapture { error in
+            DispatchQueue.main.async {
+                guard !self.recorder.isRecording else {
+                    self.isStopping = false
+                    result(FlutterError(code: "STOP_ERROR", message: "Recording stop was not confirmed", details: error?.localizedDescription))
+                    return
+                }
+                self.isRecording = false
+                guard let writer = self.videoWriter, writer.status == .writing else {
+                    self.isStopping = false
+                    result("")
+                    return
+                }
                 self.videoWriterInput?.markAsFinished()
                 self.audioWriterInput?.markAsFinished()
-                self.videoWriter?.finishWriting {
-                    if let error = error {
-                        result(FlutterError(code: "STOP_ERROR", message: "Failed to stop recording", details: error.localizedDescription))
-                    } else {
-                        let alertController = UIAlertController(title: "Your video was successfully saved", message: nil, preferredStyle: .alert)
-                        let defaultAction = UIAlertAction(title: "OK", style: .default, handler: nil)
-                        alertController.addAction(defaultAction)
-                        result(self.videoOutputURL?.path)
+                writer.finishWriting {
+                    DispatchQueue.main.async {
+                        self.isStopping = false
+                        result(writer.status == .completed ? writer.outputURL.path : "")
                     }
                 }
             }
-        }
-        else {
-            result(FlutterError(code: "IOS_VERSION_ERROR", message: "This feature is only available on iOS 11 or later", details: nil))
         }
     }
 }

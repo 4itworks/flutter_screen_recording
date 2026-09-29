@@ -181,20 +181,22 @@ class FlutterScreenRecordingPlugin :
                     result.success(false)
                 }
             }
-            "stopRecordScreen" -> {
+            "stopRecordScreen", "stopRecordScreenConfirmed" -> {
+                if (pendingResult != null) {
+                    result.error("START_PENDING", "Recording start has not completed.", null)
+                    return
+                }
                 try {
+                    val path = stopRecordScreen()
+                    // Service cleanup must not prevent capture termination.
                     serviceConnection?.let {
-                        appContext.unbindService(it)
+                        runCatching { appContext.unbindService(it) }
+                        serviceConnection = null
                     }
-                    ForegroundService.stopService(pluginBinding!!.applicationContext)
-                    if (mMediaRecorder != null) {
-                        stopRecordScreen()
-                        result.success(mFileName)
-                    } else {
-                        result.success("")
-                    }
+                    runCatching { ForegroundService.stopService(appContext) }
+                    result.success(path)
                 } catch (e: Exception) {
-                    result.success("")
+                    result.error("STOP_ERROR", "Recording stop was not confirmed.", e.message)
                 }
             }
             else -> {
@@ -286,21 +288,20 @@ class FlutterScreenRecordingPlugin :
 
     }
 
-    private fun stopRecordScreen() {
-        try {
-            println("stopRecordScreen")
-            mMediaRecorder?.stop()
-            mMediaRecorder?.reset()
-            println("stopRecordScreen success")
-
+    private fun stopRecordScreen(): String {
+        stopScreenSharing()
+        val recorder = mMediaRecorder ?: return ""
+        val path = try {
+            recorder.stop()
+            mFileName.orEmpty()
         } catch (e: Exception) {
-            Log.d("--INIT-RECORDER", e.message + "")
-            println("stopRecordScreen error")
-            println(e.message)
-
-        } finally {
-            stopScreenSharing()
+            // A very short recording may have no valid output.
+            Log.w("ScreenRecordingPlugin", "No recording output", e)
+            ""
         }
+        recorder.release()
+        mMediaRecorder = null
+        return path
     }
 
     private fun createVirtualDisplay(): VirtualDisplay? {
@@ -317,15 +318,15 @@ class FlutterScreenRecordingPlugin :
     }
 
     private fun stopScreenSharing() {
-        if (mVirtualDisplay != null) {
-            mVirtualDisplay?.release()
-            if (mMediaProjection != null && mMediaProjectionCallback != null) {
-                mMediaProjection?.unregisterCallback(mMediaProjectionCallback!!)
-                mMediaProjection?.stop()
-                mMediaProjection = null
-            }
-            Log.d("TAG", "MediaProjection Stopped")
+        val projection = mMediaProjection
+        projection?.stop()
+        mMediaProjection = null
+        mMediaProjectionCallback?.let { callback ->
+            runCatching { projection?.unregisterCallback(callback) }
         }
+        mMediaProjectionCallback = null
+        mVirtualDisplay?.release()
+        mVirtualDisplay = null
     }
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -351,9 +352,10 @@ class FlutterScreenRecordingPlugin :
 
     inner class MediaProjectionCallback : MediaProjection.Callback() {
         override fun onStop() {
-            mMediaRecorder?.reset()
+            if (mMediaProjectionCallback !== this) return
             mMediaProjection = null
-            stopScreenSharing()
+            runCatching { mMediaRecorder?.reset() }
+            runCatching { stopScreenSharing() }
         }
     }
 }
